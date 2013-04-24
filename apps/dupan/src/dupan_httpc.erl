@@ -14,18 +14,25 @@
 
 %% API
 -export([start_link/0]).
--export([get/1]).
+-export([get_raw/1, get_json/1, get_cookie/1]).
+-export([post_data/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
--define(HEADERS, [{"user-agent",
+-define(HEADERS, [{"User-Agent",
                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_5) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                   "Chrome/27.0.1453.6 Safari/537.36"}]).
+                   "Chrome/27.0.1453.6 Safari/537.36"},
+                  {"Referer",
+                   "http://pan.baidu.com/disk/home"},
+                  {"Accept", "*/*"}]).
+
 -define(PROFILE, baidu_disk).
+
+-include_lib("inets/src/http_client/httpc_internal.hrl").
 
 -record(state, {username}).
 
@@ -43,9 +50,22 @@
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+post_data(Url, Data) ->
+    Body = gen_server:call(?SERVER, {post, Url, Data}).
 
-get(Url) ->
+get_json(Url) ->
+    Body = gen_server:call(?SERVER, {get, Url}),
+    {Result} = jiffy:decode(Body),
+    Result.
+
+get_raw(Url) ->
     gen_server:call(?SERVER, {get, Url}).
+
+
+get_cookie(Key) ->
+    Cookies = proplists:get_value(cookies, httpc:which_cookies(?PROFILE)),
+    #http_cookie{name=Key, value=Value} = lists:keyfind(Key, 4, Cookies),
+    Value.
 
 
 %%%===================================================================
@@ -64,8 +84,10 @@ get(Url) ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    Username = "000000000",
-    Password = "111111111",
+    ConfFile = filename:join(code:priv_dir(dupan), "dupan.conf"),
+    {ok, Conf} = file:consult(ConfFile),
+    Username = proplists:get_value(username, Conf),
+    Password = proplists:get_value(passport, Conf),
     inets:start(),
     ssl:start(),
     inets:start(httpc,
@@ -85,8 +107,6 @@ init([]) ->
             end
     end.
 
-
-
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -101,15 +121,25 @@ init([]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+%% headers_as_is not work
 handle_call({get, Url}, _From, State) ->
-    {ok, {_, _, Body}} = httpc:request(
-                           get,
-                           {Url,
-                            ?HEADERS},
-                           [], [], ?PROFILE),
-    lager:info("get ~p body:~p~n", [Url, Body]),
-    {Result} = jiffy:decode(Body),
-    {reply, Result, State};
+    A = {ok, {_, Headers, Body}} = httpc:request(get, {Url, ?HEADERS},
+                                                 [{autoredirect, false}], [], ?PROFILE),
+    lager:info("get ~p header ~p~nbody:~p~n", [Url, Headers, Body]),
+    case proplists:get_value("location", Headers) of
+        JumpUrl = "http" ++ _ ->
+            handle_call({get, JumpUrl}, _From, State);
+        RelativeUrl = "/" ++ _ ->
+            JumpUrl = uri_with_new_path(Url, RelativeUrl),
+            handle_call({get, JumpUrl}, _From, State);
+        undefined ->
+            {reply, Body, State}
+    end;
+handle_call({post, Url, Data}, _From, State) ->
+    A = {ok, {_, Headers, Body}} = httpc:request(post, {Url, ?HEADERS, "application/x-www-form-urlencoded", Data},
+                                                 [], [], ?PROFILE),
+    lager:info("post ~p header ~p~nbody:~p~n", [Url, Headers, Body]),
+    {reply, Body, State};
 handle_call({quota}, _From, State) ->
     {ok, {_, _, Body}} = httpc:request(
                            get,
@@ -313,3 +343,15 @@ hex_octet(N) ->
 
 timestamp() ->
     io_lib:format("~p~p~p", tuple_to_list(now())).
+
+
+store_cookies(Headers, Url) ->
+    io:format("cookies: ~p~n", [[Cookie || {"set-cookie", Cookie} <- Headers]]),
+    httpc:store_cookies([{"set-cookie", re:replace(Cookie,"domain=baidu","domain=.baidu",[{return,list}])} ||
+                            {"set-cookie", Cookie} <- Headers],
+                        Url, ?PROFILE).
+
+%% http://host/path?query -> http://host/
+uri_with_new_path(Url, Path) ->
+    {ok, {Scheme, UserInfo, Host, Port, _Path, _Query}} = http_uri:parse(Url),
+    dupan_util:uri_unparse({Scheme, UserInfo, Host, Port, Path, ""}).

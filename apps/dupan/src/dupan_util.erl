@@ -9,7 +9,8 @@
 -module(dupan_util).
 
 %% API
--export([url_encode/1, escape_uri/1, timestamp/1, timestamp/0]).
+-export([url_encode/1, escape_uri/1, timestamp/1, timestamp/0, uri_unparse/1, set_nth/3]).
+-import(lists, [flatten/1]).
 
 %%%===================================================================
 %%% API
@@ -50,7 +51,25 @@ escape_uri(<<>>) ->
 timestamp() ->
     timestamp(now()).
 timestamp(Now) ->
-    io_lib:format("~p~p~p", tuple_to_list(Now)).
+    {A, B, C} = Now,
+    io_lib:format("~p~p~p", [A, B, C div 1000]).
+
+%% inverse of http_uri:parse/1
+uri_unparse({http, [], Host, 80, Path, Query}) ->
+    flatten(io_lib:format("http://~s~s~s", [Host, Path, Query]));
+uri_unparse({Scheme, [], Host, Port, Path, Query}) ->
+    flatten(io_lib:format("~p://~s:~i~s~s", [Scheme, Host, Port, Path, Query]));
+uri_unparse({Scheme, UserInfo, Host, Port, Path, Query}) ->
+    flatten(io_lib:format("~p://~s@~s:~i~s~s", [Scheme, UserInfo, Host, Port, Path, Query])).
+
+%% lists:nth, then set
+set_nth(I, New, List) ->
+    set_nth(I, New, List, []).
+set_nth(1, New, [_|Rest], Acc) ->
+    lists:reverse(Acc) ++ [New|Rest];
+set_nth(I, New, [E|Rest], Acc) when I > 1 ->
+    set_nth(I-1, New, Rest, [E|Acc]).
+
 
 %%%===================================================================
 %%% Internal functions
@@ -63,4 +82,4 @@ hex_octet(N) when N =< 9 ->
 hex_octet(N) when N > 15 ->
     hex_octet(N bsr 4) ++ hex_octet(N band 15);
 hex_octet(N) ->
-    [N - 10 + $a].
+    [N - 10 + $A].                              % $a -> $A
